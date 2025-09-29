@@ -1,16 +1,21 @@
-# Makefile para Windows
+PROG    := BasicoOpenGL.exe
+SRC     := Ponto.cpp Poligono.cpp Temporizador.cpp ListaDeCoresRGB.cpp Instancia.cpp ModeloMatricial.cpp TransformacoesGeometricas.cpp
+OBJS    := $(SRC:.cpp=.o)
 
-PROG = BasicoOpenGL.exe
-#FONTES = Linha.cpp Ponto.cpp Temporizador.cpp InterseccaoEntreTodasAsLinhas.cpp 
-FONTES = Ponto.cpp Poligono.cpp Temporizador.cpp ListaDeCoresRGB.cpp Instancia.cpp ModeloMatricial.cpp TransformacoesGeometricas.cpp
-OBJETOS = $(FONTES:.cpp=.cpp)
-CFLAGS = -g -Iinclude\GL # -Wall -g  # Todas as warnings, infos de debug
-#LDFLAGS = -Llib\GL -lfreeglut -lopengl32 -lglu32 -lm
-LDFLAGS = -Llib -lfreeglut -lopengl32 -lglu32 -lm
-CC = g++
+CXX     := g++
+CXXFLAGS+= -std=gnu++14 -O2 -Wall -Wextra -DNOMINMAX -Iinclude/GL
 
-$(PROG): $(OBJETOS)
-	g++ $(CFLAGS) $(OBJETOS) -o $@ $(LDFLAGS)
+# sem -Llib (suas libs lá eram 32-bit). use as do MSYS2:
+LDFLAGS :=
+LDLIBS  := -lfreeglut -lopengl32 -lglu32 -lwinmm -lgdi32 -limm32
 
+$(PROG): $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+.PHONY: clean
 clean:
-	rm $(OBJETOS) $(PROG)
+	-@if exist *.o del /q /f *.o
+	-@if exist $(PROG) del /q /f $(PROG)

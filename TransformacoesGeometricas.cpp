@@ -1,641 +1,692 @@
 // **********************************************************************
 // PUCRS/Escola Politecnica
-// COMPUTACAO GRAFICA
-//
-// Programa basico para criar aplicacoes 2D em OpenGL
-//
-// Marcio Sarroglia Pinho
-// pinho@pucrs.br
+// COMPUTACAO GRAFICA - Trabalho 1 (2025/2)
+// Autor: Humberto (adaptação/integração orientada)
 // **********************************************************************
-
-// Para uso no Xcode:
-// Abra o menu Product -> Scheme -> Edit Scheme -> Use custom working directory
-// Selecione a pasta onde voce descompactou o ZIP que continha este arquivo.
-//
+// Requisitos implementados:
+// - Disparador controlado por setas (rotaciona L/R, acelera Up, desacelera Down)
+// - Disparador respeita limites laterais (e verticais) da janela
+// - Tiros do jogador (ESPAÇO) com até 20 simultâneos
+// - Naves inimigas (>= 4 modelos) com movimento automático dentro da tela
+// - Tiros automáticos aleatórios e independentes dos inimigos
+// - Colisão via OOBB (envelope) entre tiros e naves / jogador
+// - Fim de jogo: vitória (todas as naves destruídas) ou derrota (vidas = 0)
+// - Modelos lidos de arquivo no formato matricial (já usado no projeto base)
+// **********************************************************************
 
 #include <iostream>
 #include <cmath>
 #include <ctime>
 #include <fstream>
-
+#include <vector>
+#include <random>
+#include <algorithm>
 
 using namespace std;
 
-
 #ifdef WIN32
-#include <windows.h>
-#include <glut.h>
+  // Não inclua <windows.h> aqui para evitar conflitos de macros.
+  // freeglut/glut lidam com isso.
+  #include <glut.h>
 #else
-#include <sys/time.h>
+  #include <sys/time.h>
 #endif
 
 #ifdef __APPLE__
-#include <GLUT/glut.h>
+  #include <GLUT/glut.h>
 #endif
 
 #ifdef __linux__
-#include <GL/glut.h>
+  #include <GL/glut.h>
 #endif
+
 #include "Ponto.h"
+#include "Poligono.h"
 #include "Instancia.h"
 #include "ModeloMatricial.h"
-
-
 #include "Temporizador.h"
 #include "ListaDeCoresRGB.h"
+// Em alguns templates do prof. há um Linha.h; não é obrigatório aqui.
+// #include "Linha.h"
 
-Temporizador T;
-double AccumDeltaT=0;
-Temporizador T2;
-
-Instancia Personagens[500];
-ModeloMatricial Modelos[15];
-int AREA_DE_BACKUP = 250;
-
-// Limites l�gicos da �rea de desenho
-Ponto Min, Max;
-
-bool desenha = false;
+// ---------------------------------------------------------------------
+// Globais
+// ---------------------------------------------------------------------
+Temporizador T;              // animação (redesenho)
+Temporizador Tick;           // lógica (movimento/IA)
+double AccumDeltaT = 0.0;
+double AccumLogic  = 0.0;
 
 Poligono Mapa, MeiaSeta, Mastro;
-int nInstancias=0;
-int nModelos=0;
-int ModeloCorrente;
-int PersonagemAtual;
 
-float angulo=0.0;
+constexpr int MAX_INSTANCIAS = 500;
+constexpr int AREA_DE_BACKUP = 250;    // reserva para backups de spawn/respawn
+Instancia Personagens[MAX_INSTANCIAS + AREA_DE_BACKUP];
 
-void CriaInstancias();
+ModeloMatricial Modelos[32];
+int nInstancias   = 0;  // instâncias ativas (0 = jogador; demais = inimigos/tiros)
+int nModelos      = 0;  // quantos modelos carregados no vetor Modelos
 
-// **********************************************************************
-//
-// **********************************************************************
-void RotacionaAoRedorDeUmPonto(float alfa, Ponto P)
-{
+// Índices fixos de modelos
+int ID_MODELO_JOGADOR   = 0;
+int ID_MODELO_PROJETIL  = 1;
+int ID_MODELO_INICIO_NAVES = 2; // a partir daqui, naves inimigas
+
+// Parâmetros de jogo
+constexpr int   MAX_TIROS_JOGADOR = 20;
+constexpr int   MAX_TIROS_INIMIGOS = 100;
+int Vidas = 3;
+
+// “Tags” para identificar de quem é o tiro (usamos Pivot.z como campo livre)
+enum DonoDoTiro { OWNER_NINGUEM = 0, OWNER_JOGADOR = 1, OWNER_INIMIGO = 2 };
+
+// Limites lógicos da área de desenho
+Ponto Min, Max;
+
+// Controle de desenho do envelope
+bool desenhaEnvelope = false;
+
+// Aleatoriedade
+std::mt19937_64 rng(123456); // semente fixa (determinístico). Troque para time(NULL) se quiser.
+std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+
+// Estado auxiliar
+int PersonagemAtual = 0; // quem está sendo desenhado (para DesenhaPersonagemMatricial)
+
+float angulo = 0.0f; // para os elementos decorativos (catavento, se usados)
+
+// ---------------------------------------------------------------------
+// Utilidades
+// ---------------------------------------------------------------------
+static inline float clampf(float v, float a, float b) {
+    return std::max(a, std::min(v, b));
+}
+
+// Evita sair da tela (usado em jogador e inimigos)
+void MantemDentroDosLimites(int idx) {
+    Personagens[idx].Posicao.x = clampf(Personagens[idx].Posicao.x, Min.x + 0.5f, Max.x - 0.5f);
+    Personagens[idx].Posicao.y = clampf(Personagens[idx].Posicao.y, Min.y + 0.5f, Max.y - 0.5f);
+}
+
+// ---------------------------------------------------------------------
+// Transformações auxiliares (como no código base do prof.)
+// ---------------------------------------------------------------------
+void RotacionaAoRedorDeUmPonto(float alfa, Ponto P) {
     glTranslatef(P.x, P.y, P.z);
     glRotatef(alfa, 0,0,1);
     glTranslatef(-P.x, -P.y, -P.z);
 }
 
-// **********************************************************************
-//
-// **********************************************************************
-void CarregaModelos()
-{
-    Mapa.LePoligono("EstadoRS.txt");
-    MeiaSeta.LePoligono("MeiaSeta.txt");
-    Mastro.LePoligono("Mastro.txt");
- 
-    Modelos[0].leModelo("MatrizExemplo0.txt");
-    //Modelos[0].Imprime();
-    Modelos[1].leModelo("MatrizProjetil.txt");
-    /*
-    Modelos[2].leModelo("NaveCaca.txt");
-    Modelos[3].leModelo("NavePassageiros.txt");
-    */
-    nModelos = 1;
-}
+// ---------------------------------------------------------------------
+// Desenho matricial do “modelo” (como no base)
+// ---------------------------------------------------------------------
+void SetaCor(int cor) { defineCor(cor); }
 
-// **********************************************************************
-//
-// **********************************************************************
-void init()
-{
-    // Define a cor do fundo da tela (AZUL)
-    glClearColor(0.5f, 0.5f, 1.0f, 1.0f);
-
-    CarregaModelos();
-    CriaInstancias();
-    float d = 20;
-    Min = Ponto(-d,-d);
-    Max = Ponto(d,d);
-}
-
-double nFrames=0;
-double TempoTotal=0;
-
-// **********************************************************************
-//
-// **********************************************************************
-void animate()
-{
-    double dt;
-    dt = T.getDeltaT();
-    AccumDeltaT += dt;
-    TempoTotal += dt;
-    nFrames++;
-
-    if (AccumDeltaT > 1.0/30) // fixa a atualiza��o da tela em 30
-    {
-        AccumDeltaT = 0;
-        angulo+=2;
-        glutPostRedisplay();
-    }
-    if (TempoTotal > 5.0)
-    {
-        cout << "Tempo Acumulado: "  << TempoTotal << " segundos. " ;
-        cout << "Nros de Frames sem desenho: " << nFrames << endl;
-        cout << "FPS(sem desenho): " << nFrames/TempoTotal << endl;
-        TempoTotal = 0;
-        nFrames = 0;
-    }
-}
-// **********************************************************************
-//  void reshape( int w, int h )
-//  trata o redimensionamento da janela OpenGL
-// **********************************************************************
-void reshape( int w, int h )
-{
-    // Reset the coordinate system before modifying
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    // Define a area a ser ocupada pela area OpenGL dentro da Janela
-    glViewport(0, 0, w, h);
-    // Define os limites logicos da area OpenGL dentro da Janela
-    glOrtho(Min.x,Max.x, Min.y,Max.y, -10,+10);
-
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-}
-
-// **********************************************************************
-void SetaCor(int cor)
-{
-    defineCor(cor);
-}
-// **********************************************************************
-void DesenhaLinha(Ponto P1, Ponto P2)
-{
-    glBegin(GL_LINES);
-        glVertex3f(P1.x,P1.y,P1.z);
-        glVertex3f(P2.x,P2.y,P2.z);
-    glEnd();
-}
-// **********************************************************************
-void DesenhaCelula()
-{
+void DesenhaCelula() {
     glBegin(GL_QUADS);
-        glVertex2f(0,0);
-        glVertex2f(0,1);
-        glVertex2f(1,1);
-        glVertex2f(1,0);
+      glVertex2f(0,0);
+      glVertex2f(0,1);
+      glVertex2f(1,1);
+      glVertex2f(1,0);
     glEnd();
-
 }
-// **********************************************************************
-void DesenhaBorda()
-{
+void DesenhaBorda() {
     glBegin(GL_LINE_LOOP);
-        glVertex2f(0,0);
-        glVertex2f(0,1);
-        glVertex2f(1,1);
-        glVertex2f(1,0);
+      glVertex2f(0,0);
+      glVertex2f(0,1);
+      glVertex2f(1,1);
+      glVertex2f(1,0);
     glEnd();
-
 }
 
-// **********************************************************************
-void DesenhaPersonagemMatricial()
-{
+void DesenhaPersonagemMatricial() {
     ModeloMatricial MM;
-    
     int ModeloDoPersonagem = Personagens[PersonagemAtual].IdDoModelo;
     MM = Modelos[ModeloDoPersonagem];
-      
+
     glPushMatrix();
     int larg = MM.nColunas;
-    int alt = MM.nLinhas;
-    //cout << alt << " LINHAS e " << larg << " COLUNAS" << endl;
-    for (int i=0;i<alt;i++)
-    {
-       glPushMatrix();
-       for (int j=0;j<larg;j++)
-       {
-           int cor = MM.getColor(alt-1-i,j);
-           if (cor != -1) // nao desenha celulas com -1 (transparentes)
-           {
-               SetaCor(cor);
-               DesenhaCelula();
-               defineCor(Wheat);
-               DesenhaBorda();
-           }
-           glTranslatef(1, 0, 0);
-       }
-       glPopMatrix();
-       glTranslatef(0, 1, 0);
+    int alt  = MM.nLinhas;
+    for (int i=0;i<alt;i++) {
+        glPushMatrix();
+        for (int j=0;j<larg;j++) {
+            int cor = MM.getColor(alt-1-i, j);
+            if (cor != -1) {
+                SetaCor(cor);
+                DesenhaCelula();
+                defineCor(Wheat);
+                DesenhaBorda();
+            }
+            glTranslatef(1,0,0);
+        }
+        glPopMatrix();
+        glTranslatef(0,1,0);
     }
     glPopMatrix();
-
 }
 
-// **********************************************************************
-// **********************************************************************
-void DesenhaEixos()
-{
+// ---------------------------------------------------------------------
+// Eixos (debug)
+// ---------------------------------------------------------------------
+void DesenhaEixos() {
     Ponto Meio;
     Meio.x = (Max.x+Min.x)/2;
     Meio.y = (Max.y+Min.y)/2;
     Meio.z = (Max.z+Min.z)/2;
 
     glBegin(GL_LINES);
-    //  eixo horizontal
-        glVertex2f(Min.x,Meio.y);
-        glVertex2f(Max.x,Meio.y);
-    //  eixo vertical
-        glVertex2f(Meio.x,Min.y);
-        glVertex2f(Meio.x,Max.y);
+      glVertex2f(Min.x,Meio.y); glVertex2f(Max.x,Meio.y);
+      glVertex2f(Meio.x,Min.y); glVertex2f(Meio.x,Max.y);
     glEnd();
 }
 
-// **********************************************************************
-void DesenhaSeta()
-{
-    glPushMatrix();
-        MeiaSeta.desenhaPoligono();
-        glScaled(1,-1, 1);
-        MeiaSeta.desenhaPoligono();
-    glPopMatrix();
-}
-// **********************************************************************
-void DesenhaApontador()
-{
-    glPushMatrix();
-        glTranslated(-4, 0, 0);
-        DesenhaSeta();
-    glPopMatrix();
-}
-// **********************************************************************
-void DesenhaHelice()
-{
-    glPushMatrix();
-    for(int i=0;i < 4; i++)
-    {
-        glRotatef(90, 0, 0, 1);
-        DesenhaApontador();
+// ---------------------------------------------------------------------
+// Modelos (lidos de arquivo)
+// Ajuste os nomes conforme seus arquivos existentes no projeto.
+// Se algum não existir, fazemos fallback no modelo 0.
+// ---------------------------------------------------------------------
+bool TentaLerModelo(int idDst, const char* filename) {
+    // Retorna true se conseguiu ler; false se falhou
+    ifstream f(filename);
+    if (!f.good()) {
+        cerr << "[AVISO] Nao encontrei '" << filename
+             << "'. Vou usar o modelo 0 como fallback.\n";
+        Modelos[idDst] = Modelos[ID_MODELO_JOGADOR]; // fallback
+        return false;
     }
-    glPopMatrix();
-}
-// **********************************************************************
-void DesenhaHelicesGirando()
-{
-    glPushMatrix();
-        glRotatef(angulo, 0, 0, 1);
-        DesenhaHelice();
-   glPopMatrix();
-}
-// **********************************************************************
-void DesenhaMastro()
-{
-    Mastro.desenhaPoligono();
-}
-// **********************************************************************
-void DesenhaCatavento()
-{
-    glLineWidth(3);
-    glPushMatrix();
-        defineCor(BrightGold);
-        DesenhaMastro();
-        glPushMatrix();
-            glColor3f(1,0,0); // R, G, B  [0..1]
-            glTranslated(0,3,0);
-            glScaled(0.2, 0.2, 1);
-            defineCor(YellowGreen);
-            DesenhaHelicesGirando();
-        glPopMatrix();
-    glPopMatrix();
-}
-// **********************************************************************
-// **********************************************************************
-void DesenhaRS()
-{
-    Mapa.desenhaPoligono();
+    f.close();
+    Modelos[idDst].leModelo(filename);
+    return true;
 }
 
-// **********************************************************************
-// Esta funcao deve instanciar todos os personagens do cenario
-// **********************************************************************
-void CriaInstancias()
-{
+void CarregaModelos() {
+    // 0: Jogador; 1: Projetil; 2..: Naves
+    Modelos[ID_MODELO_JOGADOR].leModelo("MatrizExemplo0.txt"); // jogador
+    Modelos[ID_MODELO_PROJETIL].leModelo("MatrizProjetil.txt"); // projétil
 
-    int i=0;
-    float ang;
-    ang = -45;
-    Personagens[i].Posicao = Ponto (-10,0);
-    Personagens[i].Escala = Ponto (1,1);
-    Personagens[i].Rotacao = ang;
-    Personagens[i].IdDoModelo = 0;
-    Personagens[i].modelo = DesenhaPersonagemMatricial;
-    Personagens[i].Pivot = Ponto(2.5,0);
-    Personagens[i].Direcao = Ponto(0,1); // direcao do movimento para a cima
-    Personagens[i].Direcao.rotacionaZ(ang); // direcao alterada para a direita
-    Personagens[i].Velocidade = 2; // move-se a 5 m/s
+    // Tente carregar pelo menos 4 modelos de naves:
+    // Ajuste estes nomes para os que você realmente tem no seu repositório.
+    // Exemplos comuns no material do prof:
+    // "NaveCaca.txt", "NavePassageiros.txt", "NaveInimiga1.txt", "NaveInimiga2.txt"
+    const char* candidatos[] = {
+        "NaveCaca.txt",
+        "NavePassageiros.txt",
+        "NaveInimiga1.txt",
+        "NaveInimiga2.txt"
+    };
 
-    i++;
-    ang = 60;
-    Personagens[i].Posicao = Ponto (-0.5,0);
-    Personagens[i].Escala = Ponto (1,1);
-    Personagens[i].Rotacao = ang;
-    Personagens[i].IdDoModelo = 1;
-    Personagens[i].modelo = DesenhaPersonagemMatricial;
-    Personagens[i].Pivot = Ponto(0.5,0);
-    Personagens[i].Direcao = Ponto(0,1); // direcao do movimento para a cima
-    Personagens[i].Direcao.rotacionaZ(ang); // direcao alterada para a direita
-    Personagens[i].Velocidade = 3; // move-se a 5 m/s
-    
-    // Salva os dados iniciais do personagem i na area de backup
-    Personagens[i+AREA_DE_BACKUP] = Personagens[i];
-    
-    nInstancias = i+1; // esta variavel deve conter a quantidade total de personagens
-
-}
-
-// **********************************************************************
-// Esta função testa a colisao entre os envelopes
-// de dois personagens matriciais
-// **********************************************************************
-bool TestaColisao(int Objeto1, int Objeto2)
-{
-
-    //cout << "\n-----\n" << endl;
-    //Personagens[Objeto1].ImprimeEnvelope("Envelope 1: ", "\n");
-    //Personagens[Objeto2].ImprimeEnvelope("\nEnvelope 2: ", "\n");
-    //cout << endl;
-    // Testa todas as arestas do envelope de
-    // um objeto contra as arestas do outro
-   
-    for(int i=0;i<4;i++)
-    {
-        Ponto A = Personagens[Objeto1].Envelope[i];
-        Ponto B = Personagens[Objeto1].Envelope[(i+1)%4];
-        for(int j=0;j<4;j++)
-        {
-            
-//            cout << "Testando " << i << " contra " << j << endl;
-//            Personagens[Objeto1].ImprimeEnvelope("\nEnvelope 1: ", "\n");
-//            Personagens[Objeto2].ImprimeEnvelope("Envelope 2: ", "\n");
-
-            Ponto C = Personagens[Objeto2].Envelope[j];
-            Ponto D = Personagens[Objeto2].Envelope[(j+1)%4];
-
-            
-//            A.imprime("A:","\n");
-//            B.imprime("B:","\n");
-//            C.imprime("C:","\n");
-//            D.imprime("D:","\n\n");
-            
-            if (HaInterseccao(A, B, C, D))
-                return true;
-        }
+    int id = ID_MODELO_INICIO_NAVES;
+    for (const char* nome : candidatos) {
+        TentaLerModelo(id, nome);
+        id++;
     }
-    return false;
+    nModelos = max(nModelos, id); // atualiza nModelos
 }
 
-// **********************************************************************
-// Esta função calcula o envelope do personagem matricial
-// **********************************************************************
-void AtualizaEnvelope(int personagem)
-{
-    Instancia I;
-    I = Personagens[personagem];
-    
+// ---------------------------------------------------------------------
+// Envelope OOBB (como no base) e teste de colisão
+// ---------------------------------------------------------------------
+bool HaInterseccao(Ponto A, Ponto B, Ponto C, Ponto D); // deve existir em seu projeto base
+
+void AtualizaEnvelope(int personagem) {
+    Instancia I = Personagens[personagem];
     ModeloMatricial MM = Modelos[I.IdDoModelo];
-    
-    Ponto A;
-    Ponto V;
-    V = I.Direcao * (MM.nColunas/2.0);
+
+    Ponto V = I.Direcao * (MM.nColunas/2.0);
     V.rotacionaZ(90);
-    A = I.PosicaoDoPersonagem + V;
-    
+    Ponto A = I.PosicaoDoPersonagem + V;
+
     Ponto B = A + I.Direcao*(MM.nLinhas);
-    
+
     V = I.Direcao * (MM.nColunas);
     V.rotacionaZ(-90);
     Ponto C = B + V;
-    
+
     V = -I.Direcao * (MM.nLinhas);
     Ponto D = C + V;
-    
-    // Desenha o envelope
-    defineCor(Red);
-    glBegin(GL_LINE_LOOP);
-        glVertex2f(A.x, A.y);
-        glVertex2f(B.x, B.y);
-        glVertex2f(C.x, C.y);
-        glVertex2f(D.x, D.y);
-    glEnd();
-    
-    // armazerna as coordenadas do envelope na instância
+
+    if (desenhaEnvelope) {
+        defineCor(Red);
+        glBegin(GL_LINE_LOOP);
+          glVertex2f(A.x,A.y); glVertex2f(B.x,B.y);
+          glVertex2f(C.x,C.y); glVertex2f(D.x,D.y);
+        glEnd();
+    }
+
     Personagens[personagem].Envelope[0] = A;
     Personagens[personagem].Envelope[1] = B;
     Personagens[personagem].Envelope[2] = C;
     Personagens[personagem].Envelope[3] = D;
 }
-// **********************************************************************
-//
-// **********************************************************************
-void AtualizaJogo()
-{
-    // Esta funcao deverá atualizar todos os elementos do jogo
-    // em funcao das novas posicoes dos personagens
-    // Entre outras coisas, deve-se:
-    
-    //  - calcular colisões
-    // Para calcular as colisoes eh preciso fazer o calculo do envelopes de
-    // todos os personagens
-    for(int i=0; i<nInstancias;i++)
-    {
-        AtualizaEnvelope(i);
-    }
-    // Feito o calculo, eh preciso testar todos os tiros e
-    // demais personagens contra o jogador
-    
-    for(int i=1; i<nInstancias;i++) // comeca em 1 pois o 0 eh o personagem
-    {
-        if (TestaColisao(0,i)){
-            cout << "Tem colisao" << endl;
-            Personagens[i] = Personagens[i+AREA_DE_BACKUP];
+
+bool TestaColisao(int Objeto1, int Objeto2) {
+    for(int i=0;i<4;i++) {
+        Ponto A = Personagens[Objeto1].Envelope[i];
+        Ponto B = Personagens[Objeto1].Envelope[(i+1)%4];
+        for(int j=0;j<4;j++) {
+            Ponto C = Personagens[Objeto2].Envelope[j];
+            Ponto D = Personagens[Objeto2].Envelope[(j+1)%4];
+            if (HaInterseccao(A,B,C,D)) return true;
         }
     }
-    
-    //  - remover/inserir personagens
-    //  - atualizar áreas de mensagens e de icones
+    return false;
 }
-// **********************************************************************
-void AtualizaPersonagens(float tempoDecorrido)
-{
-    for(int i=0; i<nInstancias;i++)
-    {
-        Personagens[i].AtualizaPosicao(tempoDecorrido);
-    }
-    AtualizaJogo();
 
+// ---------------------------------------------------------------------
+// Criação das instâncias do jogo
+//   0 = jogador; 1..K = inimigos; demais = tiros
+// ---------------------------------------------------------------------
+int PrimeiroInimigo = 1;
+int QtdInimigos     = 12;   // você pode ajustar aqui
+float VelMinInimigo = 0.5f;
+float VelMaxInimigo = 2.0f;
+
+// probabilidade de cada inimigo atirar por segundo (~lambda/seg)
+float TaxaTiroInimigo = 0.7f;
+
+void CriaJogador() {
+    int i = 0;
+    float ang = -90; // apontando “para cima” na lógica do modelo (ajuste se desejar)
+
+    Personagens[i].Posicao = Ponto(-10, 0);
+    Personagens[i].Escala  = Ponto(1,1);
+    Personagens[i].Rotacao = ang;
+    Personagens[i].IdDoModelo = ID_MODELO_JOGADOR;
+    Personagens[i].modelo  = DesenhaPersonagemMatricial;
+    Personagens[i].Pivot   = Ponto(2.5, 0);
+    Personagens[i].Direcao = Ponto(0,1);
+    Personagens[i].Direcao.rotacionaZ(ang);
+    Personagens[i].Velocidade = 0;
+    Personagens[i + AREA_DE_BACKUP] = Personagens[i]; // backup para respawn
 }
-// **********************************************************************
-void DesenhaPersonagens()
-{
-    for(int i=0; i<nInstancias;i++)
-    {
-        PersonagemAtual = i; 
+
+bool ColideComAlgum(int idx) {
+    for (int j=0; j<idx; ++j) {
+        if (j == 0) continue; // não colidir com o jogador no spawn
+        if (TestaColisao(j, idx)) return true;
+    }
+    return false;
+}
+
+void CriaInimigos() {
+    // Posiciona aleatoriamente, sem colisão inicial e dentro dos limites
+    int i = PrimeiroInimigo;
+    int ultimo = PrimeiroInimigo + QtdInimigos;
+
+    std::uniform_real_distribution<float> rx(Min.x+2.0f, Max.x-2.0f);
+    std::uniform_real_distribution<float> ry(Min.y+2.0f, Max.y-2.0f);
+    std::uniform_real_distribution<float> rang(0.0f, 360.0f);
+    std::uniform_real_distribution<float> rvel(VelMinInimigo, VelMaxInimigo);
+
+    for (; i<ultimo; ++i) {
+        bool ok = false;
+        int tentativas = 0;
+        do {
+            tentativas++;
+            float ang = rang(rng);
+
+            Personagens[i].Posicao = Ponto(rx(rng), ry(rng));
+            Personagens[i].Escala  = Ponto(1,1);
+            Personagens[i].Rotacao = ang;
+            // Escolhe um modelo de nave (2..5) ciclando
+            int idNav = ID_MODELO_INICIO_NAVES + ((i-PrimeiroInimigo) % 4);
+            Personagens[i].IdDoModelo = idNav;
+            Personagens[i].modelo     = DesenhaPersonagemMatricial;
+            Personagens[i].Pivot      = Ponto(0.5,0);
+            Personagens[i].Direcao    = Ponto(0,1);
+            Personagens[i].Direcao.rotacionaZ(ang);
+            Personagens[i].Velocidade = rvel(rng);
+
+            // precisa do envelope para testar colisão
+            AtualizaEnvelope(i);
+            ok = !ColideComAlgum(i);
+        } while(!ok && tentativas < 50);
+
+        Personagens[i + AREA_DE_BACKUP] = Personagens[i]; // backup para respawn (se quiser)
+    }
+
+    nInstancias = ultimo; // até aqui são jogador + inimigos
+}
+
+// ---------------------------------------------------------------------
+// Tiros
+//   Dono do tiro é guardado em Personagens[i].Pivot.z (0/1/2)
+//   Limitamos 20 tiros do jogador simultâneos
+// ---------------------------------------------------------------------
+int ContaTirosDoDono(int dono) {
+    int c=0;
+    for (int i=PrimeiroInimigo+QtdInimigos; i<nInstancias; ++i) {
+        if (Personagens[i].IdDoModelo == ID_MODELO_PROJETIL &&
+            (int)std::round(Personagens[i].Pivot.z) == dono) c++;
+    }
+    return c;
+}
+
+void RemoveInstancia(int idx) {
+    if (idx < 0 || idx >= nInstancias) return;
+    // “remove” colocando a última instância ativa no lugar
+    if (idx != nInstancias-1) {
+        Personagens[idx] = Personagens[nInstancias-1];
+    }
+    nInstancias--;
+}
+
+void CriaTiro2(int nAtirador) { // conforme orientação do Moodle
+    if (nInstancias >= MAX_INSTANCIAS-1) return;
+
+    int i = nInstancias;
+    Instancia Atirador = Personagens[nAtirador];
+
+    float ang = Atirador.Rotacao;
+
+    Personagens[i].Escala = Ponto(1,1);
+    Personagens[i].Rotacao = ang;
+    Personagens[i].IdDoModelo = ID_MODELO_PROJETIL;
+    Personagens[i].modelo = DesenhaPersonagemMatricial;
+    Personagens[i].Pivot = Ponto(0.5,0);
+
+    Personagens[i].Direcao = Ponto(0,1);
+    Personagens[i].Direcao.rotacionaZ(ang);
+
+    int Altura = Modelos[Atirador.IdDoModelo].nLinhas;
+    // sai um pouco à frente do atirador
+    Ponto P = Atirador.PosicaoDoPersonagem + Atirador.Direcao*Altura * 1.05f - Personagens[i].Pivot;
+
+    Personagens[i].Posicao = P;
+
+    // tag de dono do tiro (1 = jogador, 2 = inimigo)
+    int dono = (nAtirador==0) ? OWNER_JOGADOR : OWNER_INIMIGO;
+    Personagens[i].Pivot.z = (float)dono;
+
+    // velocidade maior que a do atirador
+    Personagens[i].Velocidade = (nAtirador==0) ? 3.0f : 2.5f;
+
+    Personagens[i + AREA_DE_BACKUP] = Personagens[i];
+    nInstancias++;
+}
+
+void CriaTiro() { // versão sem parâmetro (atira o jogador)
+    // limita 20 tiros simultâneos do jogador
+    if (ContaTirosDoDono(OWNER_JOGADOR) >= MAX_TIROS_JOGADOR) return;
+    CriaTiro2(0);
+}
+
+// ---------------------------------------------------------------------
+// Atualização de envelopes, colisões e lógica do jogo
+// ---------------------------------------------------------------------
+void AtualizaTodosEnvelopes() {
+    for (int i=0; i<nInstancias; ++i) AtualizaEnvelope(i);
+}
+
+bool EhTiroDoJogador(int i) {
+    return Personagens[i].IdDoModelo == ID_MODELO_PROJETIL &&
+           (int)std::round(Personagens[i].Pivot.z) == OWNER_JOGADOR;
+}
+bool EhTiroDoInimigo(int i) {
+    return Personagens[i].IdDoModelo == ID_MODELO_PROJETIL &&
+           (int)std::round(Personagens[i].Pivot.z) == OWNER_INIMIGO;
+}
+bool EhInimigo(int i) {
+    return Personagens[i].IdDoModelo >= ID_MODELO_INICIO_NAVES;
+}
+
+void AtualizaJogo() {
+    // 1) Atualiza envelopes
+    AtualizaTodosEnvelopes();
+
+    // 2) Colisões tiro do jogador x inimigos
+    for (int i=PrimeiroInimigo+QtdInimigos; i<nInstancias; ++i) {
+        if (!EhTiroDoJogador(i)) continue;
+        for (int j=PrimeiroInimigo; j<PrimeiroInimigo+QtdInimigos; ++j) {
+            if (j >= nInstancias) break;           // se já removemos todos
+            if (!EhInimigo(j)) continue;
+            if (TestaColisao(i, j)) {
+                // remove inimigo e tiro
+                RemoveInstancia(j);
+                RemoveInstancia(i);
+                // como removemos j (colocando a última no lugar),
+                // precisamos reiniciar loop externo de inimigos
+                // e também garantir que i ainda é válido
+                AtualizaTodosEnvelopes();
+                break;
+            }
+        }
+    }
+
+    // 3) Colisões tiro de inimigo x jogador
+    for (int i=PrimeiroInimigo+QtdInimigos; i<nInstancias; ++i) {
+        if (!EhTiroDoInimigo(i)) continue;
+        if (TestaColisao(0, i)) {
+            // jogador perde vida, respawna
+            Vidas--;
+            cout << "Levou um tiro! Vidas = " << Vidas << endl;
+            // restaura do backup
+            Personagens[0] = Personagens[0 + AREA_DE_BACKUP];
+            RemoveInstancia(i);
+            AtualizaTodosEnvelopes();
+            if (Vidas <= 0) {
+                cout << "DERROTA. Vidas acabaram." << endl;
+                exit(0);
+            }
+        }
+    }
+
+    // 4) Remove tiros que saíram da tela
+    for (int i=PrimeiroInimigo+QtdInimigos; i<nInstancias; /*nada*/) {
+        bool tiro = Personagens[i].IdDoModelo == ID_MODELO_PROJETIL;
+        if (tiro) {
+            Ponto p = Personagens[i].Posicao;
+            if (p.x < Min.x-2 || p.x > Max.x+2 || p.y < Min.y-2 || p.y > Max.y+2) {
+                RemoveInstancia(i);
+                continue; // não incrementa i, pois a última veio para i
+            }
+        }
+        ++i;
+    }
+
+    // 5) Vitória: se não há mais inimigos
+    int vivos = 0;
+    for (int i=PrimeiroInimigo; i<nInstancias; ++i) if (EhInimigo(i)) vivos++;
+    if (vivos == 0) {
+        cout << "VITORIA! Todas as naves inimigas foram destruidas." << endl;
+        exit(0);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Atualização do movimento (posições) — física simples
+// ---------------------------------------------------------------------
+void AtualizaPersonagens(float dt) {
+    // Jogador dentro da tela + move
+    Personagens[0].AtualizaPosicao(dt);
+    MantemDentroDosLimites(0);
+
+    // Inimigos e tiros
+    for (int i=PrimeiroInimigo; i<nInstancias; ++i) {
+        Personagens[i].AtualizaPosicao(dt);
+        if (EhInimigo(i)) {
+            // Evita sair da tela: se bater, vira a direção
+            Ponto p = Personagens[i].Posicao;
+            if (p.x <= Min.x+1 || p.x >= Max.x-1) {
+                Personagens[i].Direcao.rotacionaZ(180);
+                Personagens[i].Rotacao += 180;
+            }
+            if (p.y <= Min.y+1 || p.y >= Max.y-1) {
+                Personagens[i].Direcao.rotacionaZ(180);
+                Personagens[i].Rotacao += 180;
+            }
+            MantemDentroDosLimites(i);
+        }
+    }
+
+    AtualizaJogo();
+}
+
+// ---------------------------------------------------------------------
+// IA simples dos inimigos (trocas aleatórias de direção + tiros aleatórios)
+// Chamado a ~10 Hz (100 ms) para não oscilar demais
+// ---------------------------------------------------------------------
+void AtualizaInimigosIA(float dt) {
+    // probabilidade de trocar direção
+    float pTroca = 0.5f * dt; // ~0.5 trocas/seg
+
+    for (int i=PrimeiroInimigo; i<PrimeiroInimigo+QtdInimigos && i<nInstancias; ++i) {
+        if (!EhInimigo(i)) continue;
+
+        // troca aleatória de direção
+        if (u01(rng) < pTroca) {
+            float delta = (u01(rng) * 60.0f) - 30.0f; // [-30..+30] graus
+            Personagens[i].Rotacao += delta;
+            Personagens[i].Direcao.rotacionaZ(delta);
+        }
+
+        // tiro aleatório independente
+        // taxa por segundo = TaxaTiroInimigo
+        float pTiro = TaxaTiroInimigo * dt;
+        if (u01(rng) < pTiro && ContaTirosDoDono(OWNER_INIMIGO) < MAX_TIROS_INIMIGOS) {
+            CriaTiro2(i);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Renderização
+// ---------------------------------------------------------------------
+void DesenhaPersonagens() {
+    for (int i=0; i<nInstancias; ++i) {
+        PersonagemAtual = i;
         Personagens[i].desenha();
     }
 }
-// **********************************************************************
-//  void display( void )
-// **********************************************************************
-void display( void )
-{
 
-	// Limpa a tela coma cor de fundo
-	glClear(GL_COLOR_BUFFER_BIT);
-
-    // Define os limites logicos da area OpenGL dentro da Janela
-	glMatrixMode(GL_MODELVIEW);
+// ---------------------------------------------------------------------
+// GLUT: display / reshape / animate
+// ---------------------------------------------------------------------
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT);
+    glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-	// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-	// Coloque aqui as chamadas das rotinas que desenham os objetos
-	// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-	glLineWidth(1);
-	glColor3f(1,1,1); // R, G, B  [0..1]
-    
     DesenhaEixos();
-    
     DesenhaPersonagens();
-    AtualizaPersonagens(T2.getDeltaT());
-    
-	glutSwapBuffers();
-}
-// **********************************************************************
-// ContaTempo(double tempo)
-//      conta um certo numero de segundos e informa quanto frames
-// se passaram neste periodo.
-// **********************************************************************
-void ContaTempo(double tempo)
-{
-    Temporizador T;
 
+    glutSwapBuffers();
+}
+
+void reshape(int w, int h) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glViewport(0, 0, w, h);
+    glOrtho(Min.x, Max.x, Min.y, Max.y, -10, +10);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+void animate() {
+    double dt = T.getDeltaT();
+    AccumDeltaT += dt;
+    AccumLogic  += dt;
+
+    // taxa de atualização da tela: 30 FPS
+    if (AccumDeltaT >= 1.0/30.0) {
+        AccumDeltaT = 0.0;
+        glutPostRedisplay();
+    }
+    // lógica: ~100 ms (10 Hz) para a IA; e movimento em tempo contínuo
+    if (AccumLogic >= 0.1) {
+        float step = (float)AccumLogic;
+        AccumLogic = 0.0f;
+        AtualizaInimigosIA(step);
+    }
+    // movimento contínuo
+    AtualizaPersonagens((float)dt);
+}
+
+// ---------------------------------------------------------------------
+// Teclado
+// ---------------------------------------------------------------------
+void ContaTempo(double tempo) { // teste opcional
+    Temporizador Tloc;
     unsigned long cont = 0;
-    cout << "Inicio contagem de " << tempo << "segundos ..." << flush;
-    while(true)
-    {
-        tempo -= T.getDeltaT();
+    cout << "Inicio contagem de " << tempo << "s ..." << flush;
+    while(true) {
+        tempo -= Tloc.getDeltaT();
         cont++;
-        if (tempo <= 0.0)
-        {
-            cout << "fim! - Passaram-se " << cont << " frames." << endl;
+        if (tempo <= 0.0) {
+            cout << "fim! Frames: " << cont << endl;
             break;
         }
     }
 }
-// **********************************************************************
-//  void keyboard ( unsigned char key, int x, int y )
-// **********************************************************************
-void keyboard ( unsigned char key, int x, int y )
-{
 
-	switch ( key )
-	{
-		case 27:        // Termina o programa qdo
-			exit ( 0 );   // a tecla ESC for pressionada
-			break;
-        case 't':
-            ContaTempo(3);
-            break;
+void keyboard(unsigned char key, int, int) {
+    switch(key) {
+        case 27: exit(0); break;                 // ESC sai do jogo
+        case 't': ContaTempo(3); break;          // teste
         case ' ':
-            desenha = !desenha;
-        case 'd':
-            
+            CriaTiro();                           // tiro do jogador
             break;
-        case 'a':
-            
-        break;
-		default:
-			break;
-	}
+        case 'e':
+            desenhaEnvelope = !desenhaEnvelope;  // alterna envelopes
+            break;
+        default: break;
+    }
 }
-// **********************************************************************
-//  void arrow_keys ( int a_keys, int x, int y )
-// **********************************************************************
-void arrow_keys ( int a_keys, int x, int y )
-{
-	switch ( a_keys )
-	{
+
+void arrow_keys(int a_keys, int, int) {
+    switch(a_keys) {
         case GLUT_KEY_LEFT:
-            Personagens[0].Rotacao +=5;
+            Personagens[0].Rotacao += 5;
             Personagens[0].Direcao.rotacionaZ(5);
             break;
         case GLUT_KEY_RIGHT:
-            Personagens[0].Rotacao -=5;
+            Personagens[0].Rotacao -= 5;
             Personagens[0].Direcao.rotacionaZ(-5);
             break;
-		case GLUT_KEY_UP:       // Se pressionar UP
-            Personagens[0].Velocidade++;
+        case GLUT_KEY_UP:
+            Personagens[0].Velocidade += 0.5f;
             break;
-	    case GLUT_KEY_DOWN:     // Se pressionar UP
-            Personagens[0].Velocidade--;
-			break;
-		default:
-			break;
-	}
+        case GLUT_KEY_DOWN:
+            Personagens[0].Velocidade -= 0.5f;
+            break;
+        default: break;
+    }
 }
 
-// **********************************************************************
-//  void main ( int argc, char** argv )
-//
-// **********************************************************************
-int  main ( int argc, char** argv )
-{
-    cout << "Programa OpenGL" << endl;
+// ---------------------------------------------------------------------
+// Init e Main
+// ---------------------------------------------------------------------
+void init() {
+    glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
 
-    glutInit            ( &argc, argv );
-    glutInitDisplayMode (GLUT_DOUBLE | GLUT_DEPTH | GLUT_RGB );
-    glutInitWindowPosition (0,0);
+    CarregaModelos();
 
-    // Define o tamanho inicial da janela grafica do programa
-    glutInitWindowSize  ( 400, 400);
+    float d = 20.0f;
+    Min = Ponto(-d, -d);
+    Max = Ponto( d,  d);
 
-    // Cria a janela na tela, definindo o nome da
-    // que aparecera na barra de t�tulo da janela.
-    glutCreateWindow    ( "Transformacoes Geometricas em OpenGL" );
+    // cria jogador e inimigos
+    CriaJogador();
+    CriaInimigos();
+}
 
-    // executa algumas inicializa��es
-    init ();
+int main(int argc, char** argv) {
+    cout << "Programa OpenGL - T1 CG" << endl;
 
-    // Define que o tratador de evento para
-    // o redesenho da tela. A funcao "display"
-    // sera chamada automaticamente quando
-    // for necess�rio redesenhar a janela
-    glutDisplayFunc ( display );
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_DEPTH | GLUT_RGB);
+    glutInitWindowPosition(50, 50);
+    glutInitWindowSize(800, 800);
+    glutCreateWindow("T1 CG - Transformacoes Geometricas");
 
-    // Define que o tratador de evento para
-    // o invalida��o da tela. A funcao "display"
-    // ser� chamada automaticamente sempre que a
-    // m�quina estiver ociosa (idle)
+    init();
+
+    glutDisplayFunc(display);
     glutIdleFunc(animate);
+    glutReshapeFunc(reshape);
+    glutKeyboardFunc(keyboard);
+    glutSpecialFunc(arrow_keys);
 
-    // Define que o tratador de evento para
-    // o redimensionamento da janela. A funcao "reshape"
-    // ser� chamada automaticamente quando
-    // o usu�rio alterar o tamanho da janela
-    glutReshapeFunc ( reshape );
-
-    // Define que o tratador de evento para
-    // as teclas. A funcao "keyboard"
-    // ser� chamada automaticamente sempre
-    // o usu�rio pressionar uma tecla comum
-    glutKeyboardFunc ( keyboard );
-
-    // Define que o tratador de evento para
-    // as teclas especiais(F1, F2,... ALT-A,
-    // ALT-B, Teclas de Seta, ...).
-    // A funcao "arrow_keys" ser� chamada
-    // automaticamente sempre o usu�rio
-    // pressionar uma tecla especial
-    glutSpecialFunc ( arrow_keys );
-
-    // inicia o tratamento dos eventos
-    glutMainLoop ( );
-
+    glutMainLoop();
     return 0;
 }

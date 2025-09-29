@@ -1,43 +1,27 @@
 {
-    // See https://go.microsoft.com/fwlink/?LinkId=733558
-    // for the documentation about the tasks.json format
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "build",
-            "type": "shell",
-            "windows": {
-                "command": "mingw32-make -f Makefile.mk"
-            },
-            "linux": {
-                "command": "make"
-            },
-            "osx": {
-                "command": "make"
-            },
-            "problemMatcher": [
-                "$gcc"
-            ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            }
-        },
-        {
-            "label": "clean",
-            "type": "shell",
-            "windows": {
-                "command": "mingw32-make -f Makefile.mk clean"
-            },
-            "linux": {
-                "command": "make clean"
-            },
-            "osx": {
-                "command": "make clean"
-            },
-            "problemMatcher": [
-                "$gcc"
-            ]
-        }    
-    ]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build (mingw32-make)",
+      "type": "shell",
+      "command": "C:/msys64/ucrt64/bin/mingw32-make.exe",
+      "args": ["-f", "Makefile.mk"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Clean",
+      "type": "shell",
+      "command": "C:/msys64/ucrt64/bin/mingw32-make.exe",
+      "args": ["-f", "Makefile.mk", "clean"],
+      "options": { "cwd": "${workspaceFolder}" }
+    },
+    {
+      "label": "Run",
+      "type": "shell",
+      "command": "${workspaceFolder}/BasicoOpenGL.exe",
+      "options": { "cwd": "${workspaceFolder}" }
+    }
+  ]
 }

@@ -1,0 +1,6 @@
+{
+  // injeta o PATH do MSYS2 UCRT64 só no terminal integrado deste projeto
+  "terminal.integrated.env.windows": {
+    "PATH": "C:\\msys64\\ucrt64\\bin;${env:PATH}"
+  }
+}
