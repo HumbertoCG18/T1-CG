@@ -5,13 +5,13 @@
 // **********************************************************************
 // Requisitos implementados:
 // - Disparador controlado por setas (rotaciona L/R, acelera Up, desacelera Down)
-// - Disparador respeita limites laterais (e verticais) da janela
-// - Tiros do jogador (ESPAÇO) com até 20 simultâneos
+// - Disparador respeita limites da janela
+// - Tiros do jogador (ESPAÇO) com limite simultâneo
 // - Naves inimigas (>= 4 modelos) com movimento automático dentro da tela
 // - Tiros automáticos aleatórios e independentes dos inimigos
 // - Colisão via OOBB (envelope) entre tiros e naves / jogador
 // - Fim de jogo: vitória (todas as naves destruídas) ou derrota (vidas = 0)
-// - Modelos lidos de arquivo no formato matricial (já usado no projeto base)
+// - Modelos lidos de arquivo no formato matricial (pasta models/)
 // **********************************************************************
 
 #include <iostream>
@@ -21,22 +21,18 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include <string>
 
 using namespace std;
-
-#ifdef WIN32
-  // Não inclua <windows.h> aqui para evitar conflitos de macros.
-  // freeglut/glut lidam com isso.
-  #include <glut.h>
-#else
-  #include <sys/time.h>
+#ifndef MODELS_DIR
+#  define MODELS_DIR "models/"
 #endif
 
-#ifdef __APPLE__
+#ifdef _WIN32
+  #include <GL/glut.h>
+#elif __APPLE__
   #include <GLUT/glut.h>
-#endif
-
-#ifdef __linux__
+#else
   #include <GL/glut.h>
 #endif
 
@@ -46,8 +42,7 @@ using namespace std;
 #include "ModeloMatricial.h"
 #include "Temporizador.h"
 #include "ListaDeCoresRGB.h"
-// Em alguns templates do prof. há um Linha.h; não é obrigatório aqui.
-// #include "Linha.h"
+#include "Linha.h" // garante a declaração/definição de interseções quando necessário
 
 // ---------------------------------------------------------------------
 // Globais
@@ -68,14 +63,23 @@ int nInstancias   = 0;  // instâncias ativas (0 = jogador; demais = inimigos/ti
 int nModelos      = 0;  // quantos modelos carregados no vetor Modelos
 
 // Índices fixos de modelos
-int ID_MODELO_JOGADOR   = 0;
-int ID_MODELO_PROJETIL  = 1;
-int ID_MODELO_INICIO_NAVES = 2; // a partir daqui, naves inimigas
+int ID_MODELO_JOGADOR        = 0;
+int ID_MODELO_PROJETIL       = 1;
+int ID_MODELO_INICIO_NAVES   = 2; // a partir daqui, naves inimigas
 
-// Parâmetros de jogo
-constexpr int   MAX_TIROS_JOGADOR = 20;
-constexpr int   MAX_TIROS_INIMIGOS = 100;
-int Vidas = 3;
+// ====== CONFIGURAÇÕES DE ARTE E JOGABILIDADE ======
+static const std::string kModelsDir = "models/";
+
+// Velocidades (sensação de jogo mais "viva")
+constexpr float VEL_TIRO_JOGADOR = 7.0f;
+constexpr float VEL_TIRO_INIMIGO = 4.0f;
+
+// Passos mais finos deixam os controles mais suaves
+constexpr float DELTA_ROT_GRAUS = 3.0f;   // antes era 5
+constexpr float DELTA_VEL       = 0.6f;   // antes 0.5
+
+// Clamps para estabilidade visual (evita saltos)
+constexpr double MAX_DT_MOV = 0.05;       // máx. 50 ms por frame de movimento
 
 // “Tags” para identificar de quem é o tiro (usamos Pivot.z como campo livre)
 enum DonoDoTiro { OWNER_NINGUEM = 0, OWNER_JOGADOR = 1, OWNER_INIMIGO = 2 };
@@ -93,7 +97,7 @@ std::uniform_real_distribution<float> u01(0.0f, 1.0f);
 // Estado auxiliar
 int PersonagemAtual = 0; // quem está sendo desenhado (para DesenhaPersonagemMatricial)
 
-float angulo = 0.0f; // para os elementos decorativos (catavento, se usados)
+float angulo = 0.0f; // para elementos decorativos (se usados)
 
 // ---------------------------------------------------------------------
 // Utilidades
@@ -109,7 +113,7 @@ void MantemDentroDosLimites(int idx) {
 }
 
 // ---------------------------------------------------------------------
-// Transformações auxiliares (como no código base do prof.)
+// Transformações auxiliares
 // ---------------------------------------------------------------------
 void RotacionaAoRedorDeUmPonto(float alfa, Ponto P) {
     glTranslatef(P.x, P.y, P.z);
@@ -139,6 +143,10 @@ void DesenhaBorda() {
     glEnd();
 }
 
+bool EhInimigo(int i);
+bool EhTiroDoJogador(int i);
+bool EhTiroDoInimigo(int i);
+
 void DesenhaPersonagemMatricial() {
     ModeloMatricial MM;
     int ModeloDoPersonagem = Personagens[PersonagemAtual].IdDoModelo;
@@ -152,10 +160,19 @@ void DesenhaPersonagemMatricial() {
         for (int j=0;j<larg;j++) {
             int cor = MM.getColor(alt-1-i, j);
             if (cor != -1) {
-                SetaCor(cor);
-                DesenhaCelula();
-                defineCor(Wheat);
-                DesenhaBorda();
+                if (PersonagemAtual == 0) {
+                    // Jogador: tinta ciano sólida + borda clara
+                    glColor3f(0.15f, 0.95f, 1.0f);
+                    DesenhaCelula();
+                    glColor3f(0.95f, 0.98f, 1.0f);
+                    DesenhaBorda();
+                } else {
+                    // Demais usam as cores do modelo + borda âmbar
+                    SetaCor(cor);
+                    DesenhaCelula();
+                    defineCor(Wheat);
+                    DesenhaBorda();
+                }
             }
             glTranslatef(1,0,0);
         }
@@ -181,52 +198,76 @@ void DesenhaEixos() {
 }
 
 // ---------------------------------------------------------------------
-// Modelos (lidos de arquivo)
-// Ajuste os nomes conforme seus arquivos existentes no projeto.
-// Se algum não existir, fazemos fallback no modelo 0.
+// Destaque visual do jogador (contorno neon)
 // ---------------------------------------------------------------------
-bool TentaLerModelo(int idDst, const char* filename) {
-    // Retorna true se conseguiu ler; false se falhou
-    ifstream f(filename);
+void AtualizaEnvelope(int personagem); // fwd
+
+void DesenhaDestaqueJogador() {
+    // garante envelope atualizado
+    AtualizaEnvelope(0);
+
+    glLineWidth(3.0f);
+    glColor4f(0.1f, 1.0f, 1.0f, 1.0f); // ciano
+    glBegin(GL_LINE_LOOP);
+        for (int k = 0; k < 4; ++k)
+            glVertex3f(Personagens[0].Envelope[k].x,
+                       Personagens[0].Envelope[k].y,
+                       Personagens[0].Envelope[k].z);
+    glEnd();
+    glLineWidth(1.0f);
+}
+
+// ---------------------------------------------------------------------
+// Modelos (lidos de arquivo)
+// ---------------------------------------------------------------------
+// Retorna true se conseguiu ler; false se falhou.
+// 'nomeSimples' é só o nome do arquivo (ex.: "NaveCaca.txt")
+bool TentaLerModelo(int idDst, const char* nomeSimples) {
+    std::string caminho = std::string(MODELS_DIR) + nomeSimples;
+
+    ifstream f(caminho.c_str());
     if (!f.good()) {
-        cerr << "[AVISO] Nao encontrei '" << filename
-             << "'. Vou usar o modelo 0 como fallback.\n";
-        Modelos[idDst] = Modelos[ID_MODELO_JOGADOR]; // fallback
+        cerr << "[AVISO] Nao encontrei '" << caminho
+             << "'. Usando o modelo do jogador como fallback.\n";
+        Modelos[idDst] = Modelos[ID_MODELO_JOGADOR];
         return false;
     }
     f.close();
-    Modelos[idDst].leModelo(filename);
+    Modelos[idDst].leModelo(caminho.c_str());
     return true;
 }
 
 void CarregaModelos() {
     // 0: Jogador; 1: Projetil; 2..: Naves
-    Modelos[ID_MODELO_JOGADOR].leModelo("MatrizExemplo0.txt"); // jogador
-    Modelos[ID_MODELO_PROJETIL].leModelo("MatrizProjetil.txt"); // projétil
+    {
+        std::string pj = std::string(MODELS_DIR) + "MatrizExemplo0.txt";
+        Modelos[ID_MODELO_JOGADOR].leModelo(pj.c_str());
+    }
+    {
+        std::string pr = std::string(MODELS_DIR) + "MatrizProjetil.txt";
+        Modelos[ID_MODELO_PROJETIL].leModelo(pr.c_str());
+    }
 
-    // Tente carregar pelo menos 4 modelos de naves:
-    // Ajuste estes nomes para os que você realmente tem no seu repositório.
-    // Exemplos comuns no material do prof:
-    // "NaveCaca.txt", "NavePassageiros.txt", "NaveInimiga1.txt", "NaveInimiga2.txt"
-    const char* candidatos[] = {
+    // Pelo menos 4 modelos de naves:
+    const char* naves[] = {
         "NaveCaca.txt",
         "NavePassageiros.txt",
         "NaveInimiga1.txt",
         "NaveInimiga2.txt"
     };
-
     int id = ID_MODELO_INICIO_NAVES;
-    for (const char* nome : candidatos) {
+    for (const char* nome : naves) {
         TentaLerModelo(id, nome);
         id++;
     }
-    nModelos = max(nModelos, id); // atualiza nModelos
+    nModelos = std::max(nModelos, id);
 }
+
 
 // ---------------------------------------------------------------------
 // Envelope OOBB (como no base) e teste de colisão
 // ---------------------------------------------------------------------
-bool HaInterseccao(Ponto A, Ponto B, Ponto C, Ponto D); // deve existir em seu projeto base
+bool HaInterseccao(Ponto A, Ponto B, Ponto C, Ponto D); // deve existir no projeto
 
 void AtualizaEnvelope(int personagem) {
     Instancia I = Personagens[personagem];
@@ -277,7 +318,7 @@ bool TestaColisao(int Objeto1, int Objeto2) {
 //   0 = jogador; 1..K = inimigos; demais = tiros
 // ---------------------------------------------------------------------
 int PrimeiroInimigo = 1;
-int QtdInimigos     = 12;   // você pode ajustar aqui
+int QtdInimigos     = 12;   // ajuste aqui
 float VelMinInimigo = 0.5f;
 float VelMaxInimigo = 2.0f;
 
@@ -286,7 +327,7 @@ float TaxaTiroInimigo = 0.7f;
 
 void CriaJogador() {
     int i = 0;
-    float ang = -90; // apontando “para cima” na lógica do modelo (ajuste se desejar)
+    float ang = -90.0f; // orientação inicial
 
     Personagens[i].Posicao = Ponto(-10, 0);
     Personagens[i].Escala  = Ponto(1,1);
@@ -351,7 +392,6 @@ void CriaInimigos() {
 // ---------------------------------------------------------------------
 // Tiros
 //   Dono do tiro é guardado em Personagens[i].Pivot.z (0/1/2)
-//   Limitamos 20 tiros do jogador simultâneos
 // ---------------------------------------------------------------------
 int ContaTirosDoDono(int dono) {
     int c=0;
@@ -398,12 +438,15 @@ void CriaTiro2(int nAtirador) { // conforme orientação do Moodle
     int dono = (nAtirador==0) ? OWNER_JOGADOR : OWNER_INIMIGO;
     Personagens[i].Pivot.z = (float)dono;
 
-    // velocidade maior que a do atirador
-    Personagens[i].Velocidade = (nAtirador==0) ? 3.0f : 2.5f;
+    // velocidade maior que a do atirador (mais "responsivo")
+    Personagens[i].Velocidade = (nAtirador==0) ? VEL_TIRO_JOGADOR : VEL_TIRO_INIMIGO;
 
     Personagens[i + AREA_DE_BACKUP] = Personagens[i];
     nInstancias++;
 }
+
+constexpr int   MAX_TIROS_JOGADOR  = 20;
+constexpr int   MAX_TIROS_INIMIGOS = 100;
 
 void CriaTiro() { // versão sem parâmetro (atira o jogador)
     // limita 20 tiros simultâneos do jogador
@@ -430,6 +473,8 @@ bool EhInimigo(int i) {
     return Personagens[i].IdDoModelo >= ID_MODELO_INICIO_NAVES;
 }
 
+int Vidas = 3;
+
 void AtualizaJogo() {
     // 1) Atualiza envelopes
     AtualizaTodosEnvelopes();
@@ -445,8 +490,7 @@ void AtualizaJogo() {
                 RemoveInstancia(j);
                 RemoveInstancia(i);
                 // como removemos j (colocando a última no lugar),
-                // precisamos reiniciar loop externo de inimigos
-                // e também garantir que i ainda é válido
+                // precisamos reiniciar cálculos
                 AtualizaTodosEnvelopes();
                 break;
             }
@@ -557,6 +601,8 @@ void DesenhaPersonagens() {
         PersonagemAtual = i;
         Personagens[i].desenha();
     }
+    // realce do jogador por último, acima de tudo:
+    DesenhaDestaqueJogador();
 }
 
 // ---------------------------------------------------------------------
@@ -584,6 +630,7 @@ void reshape(int w, int h) {
 
 void animate() {
     double dt = T.getDeltaT();
+    if (dt > MAX_DT_MOV) dt = MAX_DT_MOV; // evita saltos grandes
     AccumDeltaT += dt;
     AccumLogic  += dt;
 
@@ -636,18 +683,18 @@ void keyboard(unsigned char key, int, int) {
 void arrow_keys(int a_keys, int, int) {
     switch(a_keys) {
         case GLUT_KEY_LEFT:
-            Personagens[0].Rotacao += 5;
-            Personagens[0].Direcao.rotacionaZ(5);
+            Personagens[0].Rotacao += DELTA_ROT_GRAUS;
+            Personagens[0].Direcao.rotacionaZ(DELTA_ROT_GRAUS);
             break;
         case GLUT_KEY_RIGHT:
-            Personagens[0].Rotacao -= 5;
-            Personagens[0].Direcao.rotacionaZ(-5);
+            Personagens[0].Rotacao -= DELTA_ROT_GRAUS;
+            Personagens[0].Direcao.rotacionaZ(-DELTA_ROT_GRAUS);
             break;
         case GLUT_KEY_UP:
-            Personagens[0].Velocidade += 0.5f;
+            Personagens[0].Velocidade += DELTA_VEL;
             break;
         case GLUT_KEY_DOWN:
-            Personagens[0].Velocidade -= 0.5f;
+            Personagens[0].Velocidade -= DELTA_VEL;
             break;
         default: break;
     }
@@ -658,6 +705,14 @@ void arrow_keys(int a_keys, int, int) {
 // ---------------------------------------------------------------------
 void init() {
     glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
+
+    // Suavização e blending para linhas/pontos mais bonitos
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+    glEnable(GL_POINT_SMOOTH);
+    glHint(GL_POINT_SMOOTH_HINT, GL_NICEST);
 
     CarregaModelos();
 
