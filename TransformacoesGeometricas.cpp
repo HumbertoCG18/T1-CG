@@ -851,8 +851,6 @@ void AtualizaInimigosIA(float dt) {
 
 // cooldown dinâmico: acelera com o Score (até um mínimo)
 float DynamicSpawnCooldown() {
-    // base diminui conforme Score, mas com piso para não ficar absurdo
-    // Fórmula suave: base / (1 + Score/K)
     const float base = 1.0f;      // s
     const float K    = 500.0f;    // a cada +500 pts dobra a taxa
     const float minc = 0.25f;     // piso
